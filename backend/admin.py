@@ -5,6 +5,26 @@ from backend.models import User, Shop, Category, Product, ProductInfo, Parameter
     Contact, ConfirmEmailToken
 
 
+class ContactInline(admin.TabularInline):
+    model = Contact
+    max_num = 1
+
+
+class ProductInline(admin.TabularInline):
+    model = Product
+    extra = 1
+
+
+class OrderItemInline(admin.TabularInline):
+    model = OrderItem
+    extra = 1
+
+
+class ProductParameterInline(admin.TabularInline):
+    model = ProductParameter
+    extra = 1
+
+
 @admin.register(User)
 class CustomUserAdmin(UserAdmin):
     """
@@ -20,17 +40,23 @@ class CustomUserAdmin(UserAdmin):
         }),
         ('Important dates', {'fields': ('last_login', 'date_joined')}),
     )
-    list_display = ('email', 'first_name', 'last_name', 'is_staff')
+    list_display = ('id', 'email', 'first_name', 'last_name', 'is_staff')
 
 
 @admin.register(Shop)
 class ShopAdmin(admin.ModelAdmin):
-    pass
+    model = Shop
+    fieldsets = (
+        (None, {'fields': ('name', 'state')}),
+        ('Additional Info', {'fields': ('url', 'user')}),
+    )
+    list_display = ('name', 'state', 'url')
 
 
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
-    pass
+    model = Category
+    inlines = [ProductInline]
 
 
 @admin.register(Product)
@@ -40,7 +66,13 @@ class ProductAdmin(admin.ModelAdmin):
 
 @admin.register(ProductInfo)
 class ProductInfoAdmin(admin.ModelAdmin):
-    pass
+    model = ProductInfo
+    fieldsets = (
+        (None, {'fields': ('product', 'model', 'external_id', 'quantity')}),
+        ('Цены', {'fields': ('price', 'price_rrc')}),
+    )
+    list_display = ('product', 'external_id', 'price', 'price_rrc', 'quantity')
+    inlines = [ProductParameterInline]
 
 
 @admin.register(Parameter)
@@ -55,7 +87,10 @@ class ProductParameterAdmin(admin.ModelAdmin):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    pass
+    model = Order
+    fields = ('user', 'state', 'contact')
+    list_display = ('id', 'user', 'dt', 'state')
+    inlines = [OrderItemInline,]
 
 
 @admin.register(OrderItem)
@@ -65,7 +100,7 @@ class OrderItemAdmin(admin.ModelAdmin):
 
 @admin.register(Contact)
 class ContactAdmin(admin.ModelAdmin):
-    pass
+    list_display = ('id', 'city', 'phone')
 
 
 @admin.register(ConfirmEmailToken)

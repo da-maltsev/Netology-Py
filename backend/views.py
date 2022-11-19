@@ -1,31 +1,35 @@
 from distutils.util import strtobool
-
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
+from django.core.exceptions import ValidationError
+
 from django.db import IntegrityError
 from django.db.models import Q, Sum, F
 from django.http import JsonResponse
-from requests import get
+from django.views.generic import TemplateView
+from rest_framework import viewsets
+
 from rest_framework.authtoken.models import Token
 from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 from ujson import loads as load_json
-from yaml import load as load_yaml, Loader
 
+from .tasks import do_import_task, new_user_registered_task, new_order_task
 from backend.models import Shop, Category, Product, ProductInfo, Parameter, ProductParameter, Order, OrderItem, \
     Contact, ConfirmEmailToken
 from backend.serializers import UserSerializer, CategorySerializer, ShopSerializer, ProductInfoSerializer, \
     OrderItemSerializer, OrderSerializer, ContactSerializer
-from backend.signals import new_user_registered, new_order
 
 
 class RegisterAccount(APIView):
     """
     Для регистрации покупателей
     """
+    throttle_classes = (AnonRateThrottle, )
+
     # Регистрация методом POST
     def post(self, request, *args, **kwargs):
 
@@ -53,7 +57,7 @@ class RegisterAccount(APIView):
                     user = user_serializer.save()
                     user.set_password(request.data['password'])
                     user.save()
-                    new_user_registered.send(sender=self.__class__, user_id=user.id)
+                    new_user_registered_task.delay(user_id=user.id)
                     return JsonResponse({'Status': True})
                 else:
                     return JsonResponse({'Status': False, 'Errors': user_serializer.errors})
@@ -65,6 +69,9 @@ class ConfirmAccount(APIView):
     """
     Класс для подтверждения почтового адреса
     """
+
+    throttle_classes = (AnonRateThrottle,)
+
     # Регистрация методом POST
     def post(self, request, *args, **kwargs):
 
@@ -88,6 +95,7 @@ class AccountDetails(APIView):
     """
     Класс для работы данными пользователя
     """
+    throttle_classes = (UserRateThrottle,)
 
     # получить данные
     def get(self, request, *args, **kwargs):
@@ -130,6 +138,8 @@ class LoginAccount(APIView):
     """
     Класс для авторизации пользователей
     """
+    throttle_classes = (AnonRateThrottle,)
+
     # Авторизация методом POST
     def post(self, request, *args, **kwargs):
 
@@ -147,7 +157,7 @@ class LoginAccount(APIView):
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
 
-class CategoryView(ListAPIView):
+class CategoryView(viewsets.ModelViewSet):
     """
     Класс для просмотра категорий
     """
@@ -155,7 +165,7 @@ class CategoryView(ListAPIView):
     serializer_class = CategorySerializer
 
 
-class ShopView(ListAPIView):
+class ShopView(viewsets.ModelViewSet):
     """
     Класс для просмотра списка магазинов
     """
@@ -167,6 +177,8 @@ class ProductInfoView(APIView):
     """
     Класс для поиска товаров
     """
+    throttle_classes = (AnonRateThrottle,)
+
     def get(self, request, *args, **kwargs):
 
         query = Q(shop__state=True)
@@ -194,8 +206,9 @@ class BasketView(APIView):
     """
     Класс для работы с корзиной пользователя
     """
-
+    throttle_classes = (UserRateThrottle,)
     # получить корзину
+
     def get(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -288,6 +301,9 @@ class PartnerUpdate(APIView):
     """
     Класс для обновления прайса от поставщика
     """
+
+    throttle_classes = (UserRateThrottle,)
+
     def post(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -296,6 +312,7 @@ class PartnerUpdate(APIView):
             return JsonResponse({'Status': False, 'Error': 'Только для магазинов'}, status=403)
 
         url = request.data.get('url')
+        partner = request.user.id
         if url:
             validate_url = URLValidator()
             try:
@@ -303,32 +320,7 @@ class PartnerUpdate(APIView):
             except ValidationError as e:
                 return JsonResponse({'Status': False, 'Error': str(e)})
             else:
-                stream = get(url).content
-
-                data = load_yaml(stream, Loader=Loader)
-
-                shop, _ = Shop.objects.get_or_create(name=data['shop'], user_id=request.user.id)
-                for category in data['categories']:
-                    category_object, _ = Category.objects.get_or_create(id=category['id'], name=category['name'])
-                    category_object.shops.add(shop.id)
-                    category_object.save()
-                ProductInfo.objects.filter(shop_id=shop.id).delete()
-                for item in data['goods']:
-                    product, _ = Product.objects.get_or_create(name=item['name'], category_id=item['category'])
-
-                    product_info = ProductInfo.objects.create(product_id=product.id,
-                                                              external_id=item['id'],
-                                                              model=item['model'],
-                                                              price=item['price'],
-                                                              price_rrc=item['price_rrc'],
-                                                              quantity=item['quantity'],
-                                                              shop_id=shop.id)
-                    for name, value in item['parameters'].items():
-                        parameter_object, _ = Parameter.objects.get_or_create(name=name)
-                        ProductParameter.objects.create(product_info_id=product_info.id,
-                                                        parameter_id=parameter_object.id,
-                                                        value=value)
-
+                do_import_task.delay(partner, url)
                 return JsonResponse({'Status': True})
 
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
@@ -338,6 +330,7 @@ class PartnerState(APIView):
     """
     Класс для работы со статусом поставщика
     """
+    throttle_classes = (UserRateThrottle,)
 
     # получить текущий статус
     def get(self, request, *args, **kwargs):
@@ -373,6 +366,8 @@ class PartnerOrders(APIView):
     """
     Класс для получения заказов поставщиками
     """
+    throttle_classes = (UserRateThrottle,)
+
     def get(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -394,8 +389,9 @@ class ContactView(APIView):
     """
     Класс для работы с контактами покупателей
     """
-
+    throttle_classes = (UserRateThrottle,)
     # получить мои контакты
+
     def get(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -466,7 +462,7 @@ class OrderView(APIView):
     """
     Класс для получения и размешения заказов пользователями
     """
-
+    throttle_classes = (UserRateThrottle,)
     # получить мои заказы
     def get(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
@@ -497,7 +493,11 @@ class OrderView(APIView):
                     return JsonResponse({'Status': False, 'Errors': 'Неправильно указаны аргументы'})
                 else:
                     if is_updated:
-                        new_order.send(sender=self.__class__, user_id=request.user.id)
+                        new_order_task.delay(user_id=request.user.id)
                         return JsonResponse({'Status': True})
 
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
+
+
+class Home(TemplateView):
+    template_name = 'backend/home.html'
