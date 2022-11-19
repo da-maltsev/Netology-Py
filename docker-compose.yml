@@ -1,0 +1,26 @@
+version: "3"
+
+services:
+  app:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./:/usr/src/app/
+    ports:
+      - "8000:8000"
+    depends_on:
+      - pgdb
+    restart: always
+
+  pgdb:
+    image: postgres
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_USER=student
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=diplom
+
+volumes:
+   postgres_data:
